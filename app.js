@@ -34,6 +34,24 @@ async function handleQuickStart() {
   const tgId = tg?.initDataUnsafe?.user?.id || Math.floor(Math.random() * 10000000);
 
   try {
+    // 0. ПРОВЕРЯЕМ ИЛИ СОЗДАЕМ ОБЩУЮ КОМНАТУ
+    let { data: room, error: roomFetchError } = await supabaseClient
+      .from('rooms')
+      .select()
+      .eq('id', SINGLE_ROOM_ID)
+      .maybeSingle();
+
+    if (!room) {
+      // Если комнаты нет, создаем её
+      const { error: createRoomError } = await supabaseClient
+        .from('rooms')
+        .insert([{ id: SINGLE_ROOM_ID, code: 'MAIN' }]);
+
+      if (createRoomError) {
+        console.warn("Предупреждение при создании комнаты:", createRoomError.message);
+      }
+    }
+
     // 1. Ищем существующего игрока
     let { data: player, error: fetchError } = await supabaseClient
       .from('room_players')
@@ -83,7 +101,7 @@ async function handleQuickStart() {
     console.error(err);
   }
 }
-
+    
 function subscribeRealtime() {
   supabaseClient.channel(`room:${SINGLE_ROOM_ID}`)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'room_players' }, () => loadGameState())
