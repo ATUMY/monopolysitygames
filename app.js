@@ -1,7 +1,7 @@
 const tg = window.Telegram?.WebApp;
 if (tg) tg.ready();
 
-const SINGLE_ROOM_ID = "MAIN_ROOM";
+const SINGLE_ROOM_ID = "00000000-0000-0000-0000-000000000001";
 
 let currentPlayer = null;
 let roomPlayers = [];
