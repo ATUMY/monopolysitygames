@@ -1,18 +1,20 @@
-import { supabase } from './supabaseClient.js';
-import { PROPERTIES, CHANCE_CARDS, TREASURY_CARDS } from './gameData.js';
-
 const tg = window.Telegram?.WebApp;
 if (tg) tg.ready();
 
-let currentRoom = null;
+// Единая комната для всех участников
+const SINGLE_ROOM_ID = "MAIN_ROOM";
+
 let currentPlayer = null;
 let roomPlayers = [];
 let roomProperties = [];
 
-function getPlayerName() {
-  const input = document.getElementById('player-name');
-  return input?.value.trim() || tg?.initDataUnsafe?.user?.first_name || 'Игрок';
-}
+// Автоматически подставляем имя из Telegram, если есть
+document.addEventListener("DOMContentLoaded", () => {
+  const input = document.getElementById('player-name-input');
+  if (input && tg?.initDataUnsafe?.user?.first_name) {
+    input.value = tg.initDataUnsafe.user.first_name;
+  }
+});
 
 function haptic(type = 'impact', style = 'medium') {
   if (!tg?.HapticFeedback) return;
@@ -20,81 +22,73 @@ function haptic(type = 'impact', style = 'medium') {
   if (type === 'notification') tg.HapticFeedback.notificationOccurred(style);
 }
 
-// ЭКСПОРТ ФУНКЦИЙ ДЛЯ КНОПОК
-window.handleCreateRoom = async function() {
+// Быстрый вход без генерации комнат
+async function handleQuickStart() {
   haptic('impact', 'light');
-  try {
-    const code = Math.random().toString(36).substring(2, 7).toUpperCase();
-    const { data: room, error } = await supabase.from('rooms').insert([{ code }]).select().single();
-    
-    if (error) {
-      alert('Ошибка Supabase: ' + error.message);
-      console.error(error);
-      return;
-    }
-    await joinRoom(room.id, code);
-  } catch (err) {
-    alert('Критическая ошибка при создании: ' + err.message);
-  }
-};
-
-window.handleJoinRoom = async function() {
-  haptic('impact', 'light');
-  try {
-    const codeInput = document.getElementById('room-code');
-    const code = codeInput ? codeInput.value.trim().toUpperCase() : '';
-    if (!code) return alert('Введите код комнаты!');
-    
-    const { data: room, error } = await supabase.from('rooms').select().eq('code', code).single();
-    if (error || !room) {
-      alert('Комната с таким кодом не найдена!');
-      return;
-    }
-    await joinRoom(room.id, code);
-  } catch (err) {
-    alert('Ошибка при входе в комнату: ' + err.message);
-  }
-};
-
-async function joinRoom(roomId, code) {
-  const name = getPlayerName();
+  const input = document.getElementById('player-name-input');
+  const name = input?.value.trim() || tg?.initDataUnsafe?.user?.first_name || 'Игрок';
   const tgId = tg?.initDataUnsafe?.user?.id || Math.floor(Math.random() * 1000000);
 
-  const { data: player, error } = await supabase.from('room_players').insert([{
-    room_id: roomId, telegram_id: tgId, name: name
-  }]).select().single();
+  try {
+    // 1. Проверяем, существует ли уже такой игрок
+    let { data: player, error } = await supabase
+      .from('room_players')
+      .select()
+      .eq('telegram_id', tgId)
+      .maybeSingle();
 
-  if (error) {
-    alert('Не удалось войти в комнату: ' + error.message);
-    return;
+    // 2. Если нет — создаем его
+    if (!player) {
+      const { data: newPlayer, error: createError } = await supabase
+        .from('room_players')
+        .insert([{
+          room_id: SINGLE_ROOM_ID,
+          telegram_id: tgId,
+          name: name,
+          balance: 1500
+        }])
+        .select()
+        .single();
+
+      if (createError) {
+        alert('Ошибка при создании игрока: ' + createError.message);
+        console.error(createError);
+        return;
+      }
+      player = newPlayer;
+    }
+
+    currentPlayer = player;
+
+    // Переключаем экран
+    document.getElementById('join-screen').classList.remove('active');
+    document.getElementById('game-screen').classList.add('active');
+
+    subscribeRealtime();
+    await loadGameState();
+    addLog(`🎮 ${currentPlayer.name} подключился к игре!`);
+
+  } catch (err) {
+    alert('Критическая ошибка: ' + err.message);
   }
-
-  currentRoom = roomId;
-  currentPlayer = player;
-
-  document.getElementById('auth-screen').classList.remove('active');
-  document.getElementById('game-screen').classList.add('active');
-
-  subscribeRealtime();
-  await loadGameState();
-  addLog(`🎮 ${name} вошел в комнату [${code}]`);
 }
 
 function subscribeRealtime() {
-  supabase.channel(`room:${currentRoom}`)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'room_players', filter: `room_id=eq.${currentRoom}` }, () => loadGameState())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'player_properties', filter: `room_id=eq.${currentRoom}` }, () => loadGameState())
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_logs', filter: `room_id=eq.${currentRoom}` }, (p) => addLog(p.new.message, false))
+  supabase.channel(`room:${SINGLE_ROOM_ID}`)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'room_players' }, () => loadGameState())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'player_properties' }, () => loadGameState())
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_logs' }, (p) => addLog(p.new.message, false))
     .subscribe();
 }
 
 async function loadGameState() {
-  const { data: players } = await supabase.from('room_players').select().eq('room_id', currentRoom);
-  const { data: props } = await supabase.from('player_properties').select().eq('room_id', currentRoom);
+  const { data: players } = await supabase.from('room_players').select();
+  const { data: props } = await supabase.from('player_properties').select();
   
   if (players) {
     roomPlayers = players;
-    currentPlayer = players.find(p => p.id === currentPlayer.id) || currentPlayer;
+    const found = players.find(p => p.id === currentPlayer?.id);
+    if (found) currentPlayer = found;
   }
   if (props) roomProperties = props;
 
@@ -111,8 +105,8 @@ async function addLog(message, saveToDb = true) {
   item.innerText = message;
   box.prepend(item);
 
-  if (saveToDb && currentRoom) {
-    await supabase.from('game_logs').insert([{ room_id: currentRoom, message }]);
+  if (saveToDb) {
+    await supabase.from('game_logs').insert([{ room_id: SINGLE_ROOM_ID, message }]);
   }
 }
 
@@ -127,8 +121,8 @@ function updateUI() {
   if (btnTurn) btnTurn.disabled = currentPlayer.is_bankrupt;
 }
 
-// ИГРОВЫЕ ДЕЙСТВИЯ
-window.handleTurn = async function() {
+// ИГРОВОЙ ХОД
+async function handleTurn() {
   if (!currentPlayer || currentPlayer.is_bankrupt) return;
   haptic('impact', 'heavy');
 
@@ -184,7 +178,7 @@ window.handleTurn = async function() {
   }
 
   await updatePlayerState();
-};
+}
 
 async function handlePropertyLand(prop) {
   const owned = roomProperties.find(p => p.property_id === prop.id);
@@ -194,7 +188,7 @@ async function handlePropertyLand(prop) {
     if (buy && currentPlayer.balance >= prop.price) {
       currentPlayer.balance -= prop.price;
       await supabase.from('player_properties').insert([{
-        room_id: currentRoom, player_id: currentPlayer.id, property_id: prop.id
+        room_id: SINGLE_ROOM_ID, player_id: currentPlayer.id, property_id: prop.id
       }]);
       addLog(`🏠 ${currentPlayer.name} купил ${prop.name} за $${prop.price}`);
     } else {
@@ -237,7 +231,7 @@ async function runAuction(prop) {
   if (winner.balance >= bid) {
     await supabase.from('room_players').update({ balance: winner.balance - bid }).eq('id', winner.id);
     await supabase.from('player_properties').insert([{
-      room_id: currentRoom, player_id: winner.id, property_id: prop.id
+      room_id: SINGLE_ROOM_ID, player_id: winner.id, property_id: prop.id
     }]);
     addLog(`🔨 ${winner.name} выиграл аукцион за ${prop.name} за $${bid}!`);
   }
@@ -265,7 +259,7 @@ async function handleCard(deck, name) {
   if (currentPlayer.balance < 0) checkBankrupt();
 }
 
-window.handleTakeCredit = async function() {
+async function handleTakeCredit() {
   if (!currentPlayer || currentPlayer.credits_taken >= 3) return alert('Лимит кредитов достигнут (макс 3)!');
   
   currentPlayer.balance += 1000;
@@ -275,7 +269,7 @@ window.handleTakeCredit = async function() {
   haptic('notification', 'warning');
   addLog(`🏦 ${currentPlayer.name} взял кредит $1000 на 30 ходов`);
   await updatePlayerState();
-};
+}
 
 function renderAssets() {
   const box = document.getElementById('my-assets-list');
@@ -300,7 +294,7 @@ function renderAssets() {
   });
 }
 
-window.buildHouse = async (recordId, propId) => {
+async function buildHouse(recordId, propId) {
   const prop = PROPERTIES.find(p => p.id === Number(propId));
   const record = roomProperties.find(r => r.id === recordId);
   
@@ -318,9 +312,9 @@ window.buildHouse = async (recordId, propId) => {
   await supabase.from('player_properties').update({ houses: record.houses + 1 }).eq('id', recordId);
   await updatePlayerState();
   addLog(`🏗️ ${currentPlayer.name} построил ${record.houses + 1 === 5 ? 'Отель' : 'дом'} на ${prop.name}`);
-};
+}
 
-window.toggleMortgage = async (recordId, isMortgaged, price) => {
+async function toggleMortgage(recordId, isMortgaged, price) {
   if (!isMortgaged) {
     currentPlayer.balance += price / 2;
     await supabase.from('player_properties').update({ is_mortgaged: true }).eq('id', recordId);
@@ -333,7 +327,7 @@ window.toggleMortgage = async (recordId, isMortgaged, price) => {
     addLog(`🔓 ${currentPlayer.name} выкупил объект за $${unmortgageCost}`);
   }
   await updatePlayerState();
-};
+}
 
 function renderMarket() {
   const box = document.getElementById('players-list');
