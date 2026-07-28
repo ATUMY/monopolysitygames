@@ -28,41 +28,36 @@
     <div class="glass">
       <input type="text" id="player-name" placeholder="Имя игрока">
       <input type="text" id="room-code" placeholder="Код комнаты">
-      <button id="btn-join">Войти в игру</button>
-      <button id="btn-create" style="background: transparent; color: var(--accent); border: 1px solid var(--accent);">+ Создать комнату</button>
+      <button type="button" onclick="window.handleJoinRoom()">Войти в игру</button>
+      <button type="button" onclick="window.handleCreateRoom()" style="background: transparent; color: var(--accent); border: 1px solid var(--accent);">+ Создать комнату</button>
     </div>
   </div>
 
   <!-- Экран 2: Игра -->
   <div id="game-screen" class="screen">
-    <!-- Шапка -->
     <div class="glass" style="display:flex; justify-content:space-between; align-items:center;">
       <div><b id="ui-name">-</b><br><small id="ui-credits">Кредиты: 0/3</small></div>
       <div style="text-align:right;"><span style="color:#4ade80; font-weight:bold;" id="ui-balance">$1500</span><br><small id="ui-turn">Круг: 0/10</small></div>
     </div>
 
-    <!-- Вкладка 1: ИГРА -->
     <div id="tab-game" class="tab-content" style="display:flex; flex-direction:column; flex:1;">
-      <button id="btn-turn" style="padding:20px; font-size:18px;">СДЕЛАТЬ ХОД</button>
-      <button id="btn-credit" style="background:rgba(255,255,255,0.1); color:#fff;">Взять кредит $1000</button>
+      <button type="button" id="btn-turn" onclick="window.handleTurn()" style="padding:20px; font-size:18px;">СДЕЛАТЬ ХОД</button>
+      <button type="button" id="btn-credit" onclick="window.handleTakeCredit()" style="background:rgba(255,255,255,0.1); color:#fff;">Взять кредит $1000</button>
       <div class="glass log-box" id="log-list"></div>
     </div>
 
-    <!-- Вкладка 2: АКТИВЫ -->
     <div id="tab-assets" class="tab-content" style="display:none; flex:1; overflow-y:auto;">
       <div class="glass" id="my-assets-list">У вас пока нет объектов</div>
     </div>
 
-    <!-- Вкладка 3: ИГРОКИ -->
     <div id="tab-players" class="tab-content" style="display:none; flex:1; overflow-y:auto;">
       <div class="glass" id="players-list"></div>
     </div>
 
-    <!-- Навигация -->
     <div class="nav">
-      <button class="tab-btn active-tab" onclick="switchTab('tab-game', this)">ИГРА</button>
-      <button class="tab-btn" onclick="switchTab('tab-assets', this)">АКТИВЫ</button>
-      <button class="tab-btn" onclick="switchTab('tab-players', this)">ИГРОКИ</button>
+      <button type="button" class="tab-btn active-tab" onclick="switchTab('tab-game', this)">ИГРА</button>
+      <button type="button" class="tab-btn" onclick="switchTab('tab-assets', this)">АКТИВЫ</button>
+      <button type="button" class="tab-btn" onclick="switchTab('tab-players', this)">ИГРОКИ</button>
     </div>
   </div>
 
