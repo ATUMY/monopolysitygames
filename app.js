@@ -1,6 +1,7 @@
 const tg = window.Telegram?.WebApp;
 if (tg) tg.ready();
 
+// Фиксированный UUID единой комнаты
 const SINGLE_ROOM_ID = "00000000-0000-0000-0000-000000000001";
 
 let currentPlayer = null;
@@ -34,25 +35,18 @@ async function handleQuickStart() {
   const tgId = tg?.initDataUnsafe?.user?.id || Math.floor(Math.random() * 10000000);
 
   try {
-    // 0. ПРОВЕРЯЕМ ИЛИ СОЗДАЕМ ОБЩУЮ КОМНАТУ
-    let { data: room, error: roomFetchError } = await supabaseClient
+    // 0. Создаем или проверяем комнату
+    let { data: room } = await supabaseClient
       .from('rooms')
       .select()
       .eq('id', SINGLE_ROOM_ID)
       .maybeSingle();
 
     if (!room) {
-      // Если комнаты нет, создаем её
-      const { error: createRoomError } = await supabaseClient
-        .from('rooms')
-        .insert([{ id: SINGLE_ROOM_ID, code: 'MAIN' }]);
-
-      if (createRoomError) {
-        console.warn("Предупреждение при создании комнаты:", createRoomError.message);
-      }
+      await supabaseClient.from('rooms').insert([{ id: SINGLE_ROOM_ID, code: 'MAIN' }]);
     }
 
-    // 1. Ищем существующего игрока
+    // 1. Ищем игрока
     let { data: player, error: fetchError } = await supabaseClient
       .from('room_players')
       .select()
@@ -60,12 +54,11 @@ async function handleQuickStart() {
       .maybeSingle();
 
     if (fetchError) {
-      alert("Ошибка базы данных: " + fetchError.message);
-      console.error(fetchError);
+      alert("Ошибка загрузки игрока: " + fetchError.message);
       return;
     }
 
-    // 2. Создаем игрока, если не найден
+    // 2. Если нет — создаем
     if (!player) {
       const { data: newPlayer, error: createError } = await supabaseClient
         .from('room_players')
@@ -73,14 +66,19 @@ async function handleQuickStart() {
           room_id: SINGLE_ROOM_ID,
           telegram_id: tgId,
           name: name,
-          balance: 1500
+          balance: 1500,
+          turn_count: 0,
+          credits_taken: 0,
+          credit_timer: 0,
+          in_jail: false,
+          jail_cards: 0,
+          is_bankrupt: false
         }])
         .select()
         .single();
 
       if (createError) {
         alert("Ошибка при создании игрока: " + createError.message);
-        console.error(createError);
         return;
       }
       player = newPlayer;
@@ -88,20 +86,20 @@ async function handleQuickStart() {
 
     currentPlayer = player;
 
-    // 3. Успешный вход
+    // Переключаем экраны
     document.getElementById('join-screen').classList.remove('active');
     document.getElementById('game-screen').classList.add('active');
 
     subscribeRealtime();
     await loadGameState();
-    addLog(`🎮 ${currentPlayer.name} подключился к игре!`);
+    await addLog(`🎮 ${currentPlayer.name} подключился к игре!`);
 
   } catch (err) {
-    alert("Критическая ошибка: " + err.message);
+    alert("Критическая ошибка при входе: " + err.message);
     console.error(err);
   }
 }
-    
+
 function subscribeRealtime() {
   supabaseClient.channel(`room:${SINGLE_ROOM_ID}`)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'room_players' }, () => loadGameState())
@@ -111,71 +109,89 @@ function subscribeRealtime() {
 }
 
 async function loadGameState() {
-  const { data: players } = await supabaseClient.from('room_players').select();
-  const { data: props } = await supabaseClient.from('player_properties').select();
-  
-  if (players) {
-    roomPlayers = players;
-    const found = players.find(p => p.id === currentPlayer?.id);
-    if (found) currentPlayer = found;
-  }
-  if (props) roomProperties = props;
+  try {
+    const { data: players } = await supabaseClient.from('room_players').select();
+    const { data: props } = await supabaseClient.from('player_properties').select();
+    
+    if (players) {
+      roomPlayers = players;
+      const found = players.find(p => p.id === currentPlayer?.id);
+      if (found) currentPlayer = found;
+    }
+    if (props) roomProperties = props;
 
-  updateUI();
-  renderAssets();
-  renderMarket();
+    updateUI();
+    renderAssets();
+    renderMarket();
+  } catch (e) {
+    console.error("Ошибка загрузки состояния:", e);
+  }
 }
 
 async function addLog(message, saveToDb = true) {
   const box = document.getElementById('log-list');
-  if (!box) return;
-  const item = document.createElement('div');
-  item.style.marginBottom = '6px';
-  item.innerText = message;
-  box.prepend(item);
+  if (box) {
+    const item = document.createElement('div');
+    item.style.marginBottom = '6px';
+    item.innerText = message;
+    box.prepend(item);
+  }
 
-  if (saveToDb) {
+  if (saveToDb && typeof supabaseClient !== 'undefined') {
     await supabaseClient.from('game_logs').insert([{ room_id: SINGLE_ROOM_ID, message }]);
   }
 }
 
 function updateUI() {
   if (!currentPlayer) return;
-  document.getElementById('ui-name').innerText = currentPlayer.name + (currentPlayer.is_bankrupt ? ' (БАНКРОТ)' : '');
+  
+  const statusText = currentPlayer.is_bankrupt ? ' (БАНКРОТ)' : (currentPlayer.in_jail ? ' (В ТЮРЬМЕ)' : '');
+  document.getElementById('ui-name').innerText = currentPlayer.name + statusText;
   document.getElementById('ui-balance').innerText = `$${currentPlayer.balance}`;
-  document.getElementById('ui-turn').innerText = `Круг: ${currentPlayer.turn_count}/10`;
-  document.getElementById('ui-credits').innerText = `Кредиты: ${currentPlayer.credits_taken}/3 (${currentPlayer.credit_timer}х)`;
+  document.getElementById('ui-turn').innerText = `Круг: ${currentPlayer.turn_count || 0}/10`;
+  document.getElementById('ui-credits').innerText = `Кредиты: ${currentPlayer.credits_taken || 0}/3 (${currentPlayer.credit_timer || 0}х)`;
   
   const btnTurn = document.getElementById('btn-turn');
-  if (btnTurn) btnTurn.disabled = currentPlayer.is_bankrupt;
+  if (btnTurn) {
+    btnTurn.disabled = currentPlayer.is_bankrupt;
+  }
 }
 
-// ИГРОВОЙ ХОД
+// ОСНОВНОЙ ИГРОВОЙ ХОД
 async function handleTurn() {
-  if (!currentPlayer || currentPlayer.is_bankrupt) return;
+  if (!currentPlayer || currentPlayer.is_bankrupt) {
+    alert("Вы не можете ходить (банкрот)!");
+    return;
+  }
+  
   haptic('impact', 'heavy');
 
+  // Проверка на Тюрьму
   if (currentPlayer.in_jail) {
-    if (currentPlayer.jail_cards > 0) {
+    if ((currentPlayer.jail_cards || 0) > 0) {
       currentPlayer.jail_cards--;
       currentPlayer.in_jail = false;
-      addLog(`🚪 ${currentPlayer.name} использовал карточку и вышел из Тюрьмы!`);
+      alert("🚪 Вы использовали карточку и вышли из Тюрьмы!");
+      await addLog(`🚪 ${currentPlayer.name} использовал карточку и вышел из Тюрьмы!`);
     } else {
-      addLog(`🔒 ${currentPlayer.name} пропускает ход (в Тюрьме)`);
+      alert("🔒 Вы пропускаете ход, так как находитесь в Тюрьме!");
+      currentPlayer.in_jail = false; // Освобождаем для следующего круга
+      await addLog(`🔒 ${currentPlayer.name} отсидел ход и выходит из Тюрьмы.`);
       await updatePlayerState();
       return;
     }
   }
 
-  let turnCount = currentPlayer.turn_count + 1;
+  // Расчет кругов и кредитов
+  let turnCount = (currentPlayer.turn_count || 0) + 1;
   let balance = currentPlayer.balance;
-  let creditTimer = currentPlayer.credit_timer;
+  let creditTimer = currentPlayer.credit_timer || 0;
 
   if (creditTimer > 0) {
     creditTimer--;
     if (creditTimer === 0 && currentPlayer.credits_taken > 0) {
       balance -= 1000;
-      addLog(`⚠️ У ${currentPlayer.name} истек срок кредита! Списано $1000.`);
+      await addLog(`⚠️ У ${currentPlayer.name} истек срок кредита! Списано $1000.`);
       if (balance < 0) checkBankrupt();
     }
   }
@@ -184,26 +200,37 @@ async function handleTurn() {
     turnCount = 0;
     balance += 200;
     haptic('notification', 'success');
-    addLog(`🎉 ${currentPlayer.name} прошёл круг! +$200 зарплата.`);
+    alert("🎉 Вы прошлый круг! Получено +$200 зарплаты.");
+    await addLog(`🎉 ${currentPlayer.name} прошёл круг! +$200 зарплата.`);
   }
 
   currentPlayer.turn_count = turnCount;
   currentPlayer.balance = balance;
   currentPlayer.credit_timer = creditTimer;
 
+  // Бросок костей (32 клетки)
   const roll = Math.floor(Math.random() * 32); 
 
   if (roll < 28) {
-    const prop = PROPERTIES.find(p => p.id === (roll + 1));
-    await handlePropertyLand(prop);
+    if (typeof PROPERTIES !== 'undefined' && PROPERTIES[roll]) {
+      const prop = PROPERTIES[roll];
+      await handlePropertyLand(prop);
+    } else {
+      alert(`Выпала клетка #${roll + 1}`);
+    }
   } else if (roll === 28 || roll === 29) {
-    await handleCard(CHANCE_CARDS, "Шанс");
+    if (typeof CHANCE_CARDS !== 'undefined') {
+      await handleCard(CHANCE_CARDS, "Шанс");
+    }
   } else if (roll === 30) {
-    await handleCard(TREASURY_CARDS, "Общественная Казна");
+    if (typeof TREASURY_CARDS !== 'undefined') {
+      await handleCard(TREASURY_CARDS, "Общественная Казна");
+    }
   } else {
     currentPlayer.in_jail = true;
     haptic('notification', 'error');
-    addLog(`🚔 ${currentPlayer.name} попал в Тюрьму!`);
+    alert("🚔 ВЫ ПОПАЛИ В ТЮРЬМУ!");
+    await addLog(`🚔 ${currentPlayer.name} попал в Тюрьму!`);
   }
 
   await updatePlayerState();
@@ -213,34 +240,36 @@ async function handlePropertyLand(prop) {
   const owned = roomProperties.find(p => p.property_id === prop.id);
 
   if (!owned) {
-    const buy = confirm(`Выпал: ${prop.name} (Цена: $${prop.price}). Купить?\nCancel = Отправить на аукцион.`);
-    if (buy && currentPlayer.balance >= prop.price) {
-      currentPlayer.balance -= prop.price;
-      await supabaseClient.from('player_properties').insert([{
-        room_id: SINGLE_ROOM_ID, player_id: currentPlayer.id, property_id: prop.id
-      }]);
-      addLog(`🏠 ${currentPlayer.name} купил ${prop.name} за $${prop.price}`);
+    const buy = confirm(`🎲 Вы попали на: ${prop.name}\nСтоимость: $${prop.price}\n\nКупить этот объект? (ОК - Купить, Cancel - Аукцион)`);
+    if (buy) {
+      if (currentPlayer.balance >= prop.price) {
+        currentPlayer.balance -= prop.price;
+        const { error } = await supabaseClient.from('player_properties').insert([{
+          room_id: SINGLE_ROOM_ID, player_id: currentPlayer.id, property_id: prop.id, houses: 0
+        }]);
+        if (error) alert("Ошибка покупки: " + error.message);
+        else await addLog(`🏠 ${currentPlayer.name} купил ${prop.name} за $${prop.price}`);
+      } else {
+        alert("Недостаточно денег для покупки!");
+      }
     } else {
-      addLog(`📢 ${prop.name} отправлен на аукцион!`);
-      runAuction(prop);
+      await addLog(`📢 ${prop.name} отправлен на аукцион!`);
+      await runAuction(prop);
     }
   } else if (owned.player_id !== currentPlayer.id && !owned.is_mortgaged) {
-    let rentCost = prop.rent[owned.houses] || prop.rent[0];
+    let rentCost = (prop.rent && prop.rent[owned.houses]) ? prop.rent[owned.houses] : (prop.rent ? prop.rent[0] : 50);
     
-    if (prop.group !== 'station' && owned.houses === 0) {
-      const groupProps = PROPERTIES.filter(p => p.group === prop.group);
-      const ownerProps = roomProperties.filter(p => p.player_id === owned.player_id && groupProps.some(gp => gp.id === p.property_id));
-      if (ownerProps.length === groupProps.length) rentCost *= 2;
-    }
-
     currentPlayer.balance -= rentCost;
-    addLog(`💸 ${currentPlayer.name} заплатил $${rentCost} аренды за ${prop.name}`);
+    alert(`💸 Вы попали на чужую собственность (${prop.name})! Списано $${rentCost} аренды.`);
+    await addLog(`💸 ${currentPlayer.name} заплатил $${rentCost} аренды за ${prop.name}`);
 
     const owner = roomPlayers.find(p => p.id === owned.player_id);
     if (owner) {
       await supabaseClient.from('room_players').update({ balance: owner.balance + rentCost }).eq('id', owner.id);
     }
     if (currentPlayer.balance < 0) checkBankrupt();
+  } else {
+    alert(`🏠 Вы встали на свой объект: ${prop.name}`);
   }
 }
 
@@ -248,75 +277,92 @@ async function runAuction(prop) {
   let bid = 10;
   let winner = currentPlayer;
   
-  roomPlayers.filter(p => !p.is_bankrupt).forEach(p => {
+  const activePlayers = roomPlayers.filter(p => !p.is_bankrupt);
+  for (let p of activePlayers) {
     if (p.balance >= bid + 10) {
-      if (confirm(`Аукцион за ${prop.name}. Игрок ${p.name}, поднять ставку до $${bid + 10}?`)) {
+      if (confirm(`🔨 Аукцион за ${prop.name}.\nТекущая ставка: $${bid}.\nИгрок ${p.name}, поднять до $${bid + 10}?`)) {
         bid += 10;
         winner = p;
       }
     }
-  });
+  }
 
-  if (winner.balance >= bid) {
+  if (winner && winner.balance >= bid) {
     await supabaseClient.from('room_players').update({ balance: winner.balance - bid }).eq('id', winner.id);
     await supabaseClient.from('player_properties').insert([{
-      room_id: SINGLE_ROOM_ID, player_id: winner.id, property_id: prop.id
+      room_id: SINGLE_ROOM_ID, player_id: winner.id, property_id: prop.id, houses: 0
     }]);
-    addLog(`🔨 ${winner.name} выиграл аукцион за ${prop.name} за $${bid}!`);
+    alert(`🔨 Аукцион завершен! Победитель: ${winner.name} ($${bid})`);
+    await addLog(`🔨 ${winner.name} выиграл аукцион за ${prop.name} за $${bid}!`);
   }
 }
 
 async function handleCard(deck, name) {
+  if (!deck || !deck.length) return;
   const card = deck[Math.floor(Math.random() * deck.length)];
-  addLog(`🎴 ${currentPlayer.name} тянет карту [${name}]: ${card.text}`);
+  
+  alert(`🎴 Карточка [${name}]:\n\n${card.text}`);
+  await addLog(`🎴 ${currentPlayer.name} вытянул [${name}]: ${card.text}`);
 
   if (card.type === 'start') {
-    currentPlayer.balance += card.value;
+    currentPlayer.balance += (card.value || 200);
     currentPlayer.turn_count = 0;
   } else if (card.type === 'money') {
-    currentPlayer.balance += card.value;
+    currentPlayer.balance += (card.value || 100);
   } else if (card.type === 'go_jail') {
     currentPlayer.in_jail = true;
   } else if (card.type === 'jail_free') {
     currentPlayer.jail_cards = (currentPlayer.jail_cards || 0) + 1;
   } else if (card.type === 'pay_players') {
-    roomPlayers.forEach(p => { if (p.id !== currentPlayer.id) currentPlayer.balance -= card.value; });
+    const val = card.value || 50;
+    roomPlayers.forEach(p => { if (p.id !== currentPlayer.id) currentPlayer.balance -= val; });
   } else if (card.type === 'collect_players') {
-    roomPlayers.forEach(p => { if (p.id !== currentPlayer.id) currentPlayer.balance += card.value; });
+    const val = card.value || 50;
+    roomPlayers.forEach(p => { if (p.id !== currentPlayer.id) currentPlayer.balance += val; });
   }
 
   if (currentPlayer.balance < 0) checkBankrupt();
 }
 
 async function handleTakeCredit() {
-  if (!currentPlayer || currentPlayer.credits_taken >= 3) return alert('Лимит кредитов достигнут (макс 3)!');
+  if (!currentPlayer || (currentPlayer.credits_taken || 0) >= 3) {
+    return alert('Лимит кредитов достигнут (максимум 3)!');
+  }
   
   currentPlayer.balance += 1000;
-  currentPlayer.credits_taken += 1;
+  currentPlayer.credits_taken = (currentPlayer.credits_taken || 0) + 1;
   currentPlayer.credit_timer = 30;
   
   haptic('notification', 'warning');
-  addLog(`🏦 ${currentPlayer.name} взял кредит $1000 на 30 ходов`);
+  alert("🏦 Вы успешно взяли кредит $1000 на 30 ходов!");
+  await addLog(`🏦 ${currentPlayer.name} взял кредит $1000 на 30 ходов`);
   await updatePlayerState();
 }
 
 function renderAssets() {
   const box = document.getElementById('my-assets-list');
-  if (!box) return;
+  if (!box || !currentPlayer) return;
   box.innerHTML = '';
+  
   const myProps = roomProperties.filter(p => p.player_id === currentPlayer.id);
-
-  if (!myProps.length) { box.innerText = 'У вас нет объектов'; return; }
+  if (!myProps.length) { 
+    box.innerText = 'У вас пока нет объектов'; 
+    return; 
+  }
 
   myProps.forEach(item => {
-    const prop = PROPERTIES.find(p => p.id === item.property_id);
+    const prop = (typeof PROPERTIES !== 'undefined') ? PROPERTIES.find(p => p.id === item.property_id) : null;
+    const propName = prop ? prop.name : `Объект #${item.property_id}`;
+    const housePrice = prop ? (prop.housePrice || 100) : 100;
+    const price = prop ? prop.price : 200;
+
     const el = document.createElement('div');
     el.style.cssText = "margin-bottom:10px; padding:8px; border-bottom:1px solid rgba(255,255,255,0.1);";
     el.innerHTML = `
-      <b>${prop.name}</b> (${item.is_mortgaged ? 'ЗАЛОЖЕН' : 'Домов: ' + item.houses})<br>
-      <button onclick="buildHouse('${item.id}', '${prop.id}')" style="width:auto; padding:4px 8px; font-size:12px;">+ Дом ($${prop.housePrice || 0})</button>
-      <button onclick="toggleMortgage('${item.id}', ${item.is_mortgaged}, ${prop.price})" style="width:auto; padding:4px 8px; font-size:12px; background:#f43f5e; color:#fff;">
-        ${item.is_mortgaged ? 'Выкупить' : 'Заложить ($' + prop.price/2 + ')'}
+      <b>${propName}</b> (${item.is_mortgaged ? 'ЗАЛОЖЕН' : 'Домов: ' + (item.houses || 0)})<br>
+      <button onclick="buildHouse('${item.id}', '${item.property_id}')" style="width:auto; padding:4px 8px; font-size:12px; margin-top:4px;">+ Дом ($${housePrice})</button>
+      <button onclick="toggleMortgage('${item.id}', ${item.is_mortgaged}, ${price})" style="width:auto; padding:4px 8px; font-size:12px; background:#f43f5e; color:#fff; margin-top:4px;">
+        ${item.is_mortgaged ? 'Выкупить' : 'Заложить ($' + price/2 + ')'}
       </button>
     `;
     box.appendChild(el);
@@ -324,36 +370,31 @@ function renderAssets() {
 }
 
 async function buildHouse(recordId, propId) {
-  const prop = PROPERTIES.find(p => p.id === Number(propId));
+  const prop = (typeof PROPERTIES !== 'undefined') ? PROPERTIES.find(p => p.id === Number(propId)) : null;
   const record = roomProperties.find(r => r.id === recordId);
+  const housePrice = prop ? (prop.housePrice || 100) : 100;
   
+  if (!record) return;
   if (record.houses >= 5) return alert('Максимум: Отель!');
-  if (currentPlayer.balance < prop.housePrice) return alert('Недостаточно средств!');
+  if (currentPlayer.balance < housePrice) return alert('Недостаточно средств!');
 
-  const groupProps = PROPERTIES.filter(p => p.group === prop.group);
-  const myGroupRecords = roomProperties.filter(r => groupProps.some(gp => gp.id === r.property_id));
-  
-  if (myGroupRecords.length < groupProps.length) return alert('Соберите весь сет города!');
-  const minHouses = Math.min(...myGroupRecords.map(r => r.houses));
-  if (record.houses > minHouses) return alert('Стройте дома равномерно!');
-
-  currentPlayer.balance -= prop.housePrice;
-  await supabaseClient.from('player_properties').update({ houses: record.houses + 1 }).eq('id', recordId);
+  currentPlayer.balance -= housePrice;
+  await supabaseClient.from('player_properties').update({ houses: (record.houses || 0) + 1 }).eq('id', recordId);
   await updatePlayerState();
-  addLog(`🏗️ ${currentPlayer.name} построил ${record.houses + 1 === 5 ? 'Отель' : 'дом'} на ${prop.name}`);
+  await addLog(`🏗️ ${currentPlayer.name} построил дом/отель`);
 }
 
 async function toggleMortgage(recordId, isMortgaged, price) {
   if (!isMortgaged) {
     currentPlayer.balance += price / 2;
     await supabaseClient.from('player_properties').update({ is_mortgaged: true }).eq('id', recordId);
-    addLog(`🏦 ${currentPlayer.name} заложил объект за $${price / 2}`);
+    await addLog(`🏦 ${currentPlayer.name} заложил объект`);
   } else {
     const unmortgageCost = (price / 2) * 1.1;
-    if (currentPlayer.balance < unmortgageCost) return alert('Не хватает денег на выкуп (+10% комиссия)!');
+    if (currentPlayer.balance < unmortgageCost) return alert('Не хватает денег на выкуп!');
     currentPlayer.balance -= unmortgageCost;
     await supabaseClient.from('player_properties').update({ is_mortgaged: false }).eq('id', recordId);
-    addLog(`🔓 ${currentPlayer.name} выкупил объект за $${unmortgageCost}`);
+    await addLog(`🔓 ${currentPlayer.name} выкупил объект`);
   }
   await updatePlayerState();
 }
@@ -361,9 +402,9 @@ async function toggleMortgage(recordId, isMortgaged, price) {
 function renderMarket() {
   const box = document.getElementById('players-list');
   if (!box) return;
-  box.innerHTML = '<h4>Игроки и Балансы:</h4>';
+  box.innerHTML = '<h4>Игроки в комнате:</h4>';
   roomPlayers.forEach(p => {
-    box.innerHTML += `<div><b>${p.name}:</b> $${p.balance} ${p.is_bankrupt ? '❌ (Банкрот)' : ''}</div>`;
+    box.innerHTML += `<div style="margin-bottom:4px;"><b>${p.name}:</b> $${p.balance} ${p.is_bankrupt ? '❌ (Банкрот)' : ''}</div>`;
   });
 }
 
@@ -375,12 +416,14 @@ function checkBankrupt() {
     alert('💥 ВЫ БАНКРОТ! Вы выбываете из игры.');
     addLog(`💥 Игрок ${currentPlayer.name} объявлен БАНКРОТОМ!`);
   } else {
-    alert('⚠️ Баланс отрицательный! Заложите активы.');
+    alert('⚠️ Баланс отрицательный! Заложите ваши объекты во вкладке «Активы».');
   }
 }
 
 async function updatePlayerState() {
-  await supabaseClient.from('room_players').update({
+  if (!currentPlayer) return;
+  
+  const { error } = await supabaseClient.from('room_players').update({
     balance: currentPlayer.balance,
     turn_count: currentPlayer.turn_count,
     credits_taken: currentPlayer.credits_taken,
@@ -389,6 +432,11 @@ async function updatePlayerState() {
     jail_cards: currentPlayer.jail_cards,
     is_bankrupt: currentPlayer.is_bankrupt
   }).eq('id', currentPlayer.id);
+
+  if (error) {
+    console.error("Ошибка при сохранении хода:", error.message);
+  }
   
   updateUI();
+  await loadGameState();
 }
