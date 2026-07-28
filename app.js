@@ -364,3 +364,6 @@ async function updatePlayerState() {
   
   updateUI();
 }
+
+window.handleCreateRoom = () => document.getElementById('btn-create').click();
+window.handleJoinRoom = () => document.getElementById('btn-join').click();
